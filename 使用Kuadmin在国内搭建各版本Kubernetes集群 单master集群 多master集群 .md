@@ -384,9 +384,245 @@ systemctl daemon-reload
 systemctl enable kubelet
 ```
 
+### 6.安装etcd集群
+```bash
+#在node01上创建etcd证书
+#1.设置cfssl环境
+wget https://pkg.cfssl.org/R1.2/cfssl_linux-amd64
+wget https://pkg.cfssl.org/R1.2/cfssljson_linux-amd64
+wget https://pkg.cfssl.org/R1.2/cfssl-certinfo_linux-amd64
+chmod +x cfssl_linux-amd64
+mv cfssl_linux-amd64 /usr/local/bin/cfssl
+chmod +x cfssljson_linux-amd64
+mv cfssljson_linux-amd64 /usr/local/bin/cfssljson
+chmod +x cfssl-certinfo_linux-amd64
+mv cfssl-certinfo_linux-amd64 /usr/local/bin/cfssl-certinfo
+export PATH=/usr/local/bin:$PATH
+
+#2.创建 CA 配置文件（下面配置的IP为etc节点的IP）
+mkdir /root/ssl
+cd /root/ssl
+cat >  ca-config.json <<EOF
+{
+"signing": {
+"default": {
+  "expiry": "8760h"
+},
+"profiles": {
+  "kubernetes-Soulmate": {
+    "usages": [
+        "signing",
+        "key encipherment",
+        "server auth",
+        "client auth"
+    ],
+    "expiry": "8760h"
+  }
+}
+}
+}
+EOF
+
+cat >  ca-csr.json <<EOF
+{
+"CN": "kubernetes-Soulmate",
+"key": {
+"algo": "rsa",
+"size": 2048
+},
+"names": [
+{
+  "C": "CN",
+  "ST": "shanghai",
+  "L": "shanghai",
+  "O": "k8s",
+  "OU": "System"
+}
+]
+}
+EOF
+
+cfssl gencert -initca ca-csr.json | cfssljson -bare ca
+
+cat > etcd-csr.json <<EOF
+{
+  "CN": "etcd",
+  "hosts": [
+    "127.0.0.1",
+    "192.168.33.61",
+    "192.168.33.62",
+    "192.168.33.63",
+    "192.168.33.66"
+  ],
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [
+    {
+      "C": "CN",
+      "ST": "shanghai",
+      "L": "shanghai",
+      "O": "k8s",
+      "OU": "System"
+    }
+  ]
+}
+EOF
+
+cfssl gencert -ca=ca.pem \
+  -ca-key=ca-key.pem \
+  -config=ca-config.json \
+  -profile=kubernetes-Soulmate etcd-csr.json | cfssljson -bare etcd
+ 
+ #3.node01分发etcd证书到node02、node03上面
+mkdir -p /etc/etcd/ssl
+cp etcd.pem etcd-key.pem ca.pem /etc/etcd/ssl/
+ssh -n k8snode02 "mkdir -p /etc/etcd/ssl && exit"
+ssh -n k8snode03 "mkdir -p /etc/etcd/ssl && exit"
+scp -r /etc/etcd/ssl/*.pem k8snode02:/etc/etcd/ssl/
+scp -r /etc/etcd/ssl/*.pem k8snode03:/etc/etcd/ssl/
+```
+
+```bash
+#在3个mater节点上安装和新建etcd数据文件
+yum install etcd -y
+mkdir -p /var/lib/etcd
+```
+
+```bash
+#在node01上配置etcd.service
+cat <<EOF >/etc/systemd/system/etcd.service
+[Unit]
+Description=Etcd Server
+After=network.target
+After=network-online.target
+Wants=network-online.target
+Documentation=https://github.com/coreos
+
+[Service]
+Type=notify
+WorkingDirectory=/var/lib/etcd/
+ExecStart=/usr/bin/etcd \
+  --name k8snode01 \
+  --cert-file=/etc/etcd/ssl/etcd.pem \
+  --key-file=/etc/etcd/ssl/etcd-key.pem \
+  --peer-cert-file=/etc/etcd/ssl/etcd.pem \
+  --peer-key-file=/etc/etcd/ssl/etcd-key.pem \
+  --trusted-ca-file=/etc/etcd/ssl/ca.pem \
+  --peer-trusted-ca-file=/etc/etcd/ssl/ca.pem \
+  --initial-advertise-peer-urls https://192.168.33.61:2380 \
+  --listen-peer-urls https://192.168.33.61:2380 \
+  --listen-client-urls https://192.168.33.61:2379,http://127.0.0.1:2379 \
+  --advertise-client-urls https://192.168.33.61:2379 \
+  --initial-cluster-token etcd-cluster-0 \
+  --initial-cluster k8snode01=https://192.168.33.61:2380,k8snode02=https://192.168.33.62:2380,k8snode03=https://192.168.33.63:2380 \
+  --initial-cluster-state new \
+  --data-dir=/var/lib/etcd
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+```bash
+#在node02上配置etcd.service
+cat <<EOF >/etc/systemd/system/etcd.service
+[Unit]
+Description=Etcd Server
+After=network.target
+After=network-online.target
+Wants=network-online.target
+Documentation=https://github.com/coreos
+
+[Service]
+Type=notify
+WorkingDirectory=/var/lib/etcd/
+ExecStart=/usr/bin/etcd \
+  --name k8snode02 \
+  --cert-file=/etc/etcd/ssl/etcd.pem \
+  --key-file=/etc/etcd/ssl/etcd-key.pem \
+  --peer-cert-file=/etc/etcd/ssl/etcd.pem \
+  --peer-key-file=/etc/etcd/ssl/etcd-key.pem \
+  --trusted-ca-file=/etc/etcd/ssl/ca.pem \
+  --peer-trusted-ca-file=/etc/etcd/ssl/ca.pem \
+  --initial-advertise-peer-urls https://192.168.33.62:2380 \
+  --listen-peer-urls https://192.168.33.62:2380 \
+  --listen-client-urls https://192.168.33.62:2379,http://127.0.0.1:2379 \
+  --advertise-client-urls https://192.168.33.62:2379 \
+  --initial-cluster-token etcd-cluster-0 \
+  --initial-cluster k8snode01=https://192.168.33.61:2380,k8snode02=https://192.168.33.62:2380,k8snode03=https://192.168.33.63:2380 \
+  --initial-cluster-state new \
+  --data-dir=/var/lib/etcd
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+```bash
+#在node03上配置etcd.service
+cat <<EOF >/etc/systemd/system/etcd.service
+[Unit]
+Description=Etcd Server
+After=network.target
+After=network-online.target
+Wants=network-online.target
+Documentation=https://github.com/coreos
+
+[Service]
+Type=notify
+WorkingDirectory=/var/lib/etcd/
+ExecStart=/usr/bin/etcd \
+  --name k8snode03 \
+  --cert-file=/etc/etcd/ssl/etcd.pem \
+  --key-file=/etc/etcd/ssl/etcd-key.pem \
+  --peer-cert-file=/etc/etcd/ssl/etcd.pem \
+  --peer-key-file=/etc/etcd/ssl/etcd-key.pem \
+  --trusted-ca-file=/etc/etcd/ssl/ca.pem \
+  --peer-trusted-ca-file=/etc/etcd/ssl/ca.pem \
+  --initial-advertise-peer-urls https://192.168.33.63:2380 \
+  --listen-peer-urls https://192.168.33.63:2380 \
+  --listen-client-urls https://192.168.33.63:2379,http://127.0.0.1:2379 \
+  --advertise-client-urls https://192.168.33.63:2379 \
+  --initial-cluster-token etcd-cluster-0 \
+  --initial-cluster k8snode01=https://192.168.33.61:2380,k8snode02=https://192.168.33.62:2380,k8snode03=https://192.168.33.63:2380 \
+  --initial-cluster-state new \
+  --data-dir=/var/lib/etcd
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+```bash
+#在三个节点上执行命令，启动etcd
+systemctl daemon-reload
+systemctl enable etcd
+systemctl start etcd
+systemctl status etcd
+```
+
+```bash
+#在其中一个节点运行检查etcd是否健康
+etcdctl --endpoints=https://192.168.33.61:2379,https://192.168.33.62:2379,https://192.33.63.183:2379 \
+  --ca-file=/etc/etcd/ssl/ca.pem \
+  --cert-file=/etc/etcd/ssl/etcd.pem \
+  --key-file=/etc/etcd/ssl/etcd-key.pem  cluster-health
+```
 
 
-### 6.在k8snode01上初始化mster节点
+
+### 7.在k8snode01上初始化mster节点
 ```bash
 #设置集群配置文件
 #192.168.33.66 虚拟ip在哪个节点就在哪个节点初始化
@@ -395,29 +631,11 @@ cat <<EOF > kubeadm-config.yaml
 apiVersion: kubeadm.k8s.io/v1beta1
 kind: InitConfiguration
 localAPIEndpoint:
-  advertiseAddress: "10.100.0.1"
+  advertiseAddress: "192.168.33.61"
   bindPort: 6443
+---
 apiVersion: kubeadm.k8s.io/v1beta1
 kind: ClusterConfiguration
-etcd:
-  local:
-    imageRepository: "registry.cn-hangzhou.aliyuncs.com/google_containers"
-    imageTag: "3.2.24"
-    dataDir: "/var/lib/etcd"
-    extraArgs:
-      listen-client-urls: "https://192.168.33.61:2379,http://127.0.0.1:2379"
-      advertise-client-urls: "https://192.168.33.61:2379"
-      initial-advertise-peer-urls: "https://192.168.33.61:2380"
-      initial-cluster: "k8snode01=https://192.168.33.61:2380"
-      listen-peer-urls: "https://192.168.33.61:2380"
-    serverCertSANs:
-    -  "192.168.33.61"
-    -  "192.168.33.66"
-    -  "k8snode01"
-    peerCertSANs:
-    -  "192.168.33.61"
-    -  "192.168.33.66"
-    -  "k8snode01"
 kubernetesVersion: "v1.13.2"
 apiServer:
   certSANs:
@@ -429,6 +647,16 @@ networking:
   dnsDomain: "cluster.local"
 imageRepository: registry.cn-hangzhou.aliyuncs.com/google_containers
 clusterName: "k8s-cluster"
+etcd:
+    external:
+        endpoints:
+        - https://192.168.33.61:2379
+        - https://192.168.33.62:2379
+        - https://192.168.33.63:2379
+        caFile: /etc/etcd/ssl/ca.pem
+        certFile: /etc/etcd/ssl/etcd.pem
+        keyFile: /etc/etcd/ssl/etcd-key.pem
+        dataDir: /var/lib/etcd
 EOF
 
 #集群初始化
@@ -453,17 +681,16 @@ Run "kubectl apply -f [podnetwork].yaml" with one of the options listed at:
 You can now join any number of machines by running the following on each node
 as root:
 
-  kubeadm join 192.168.33.66:6443 --token xzffzn.2veb9rd3hzj5kfe8 --discovery-token-ca-cert-hash sha256:1e044b5cc57a86839bdfd0c71b42e37b7c6e9c5b786bbefe8ce9cabe3537a50a
+  kubeadm join 192.168.33.66:6443 --token cqagqf.4o3vh6gqxwwij9cf --discovery-token-ca-cert-hash sha256:a594b3b55ae13d0a782b116e65d962d07f764bc2a3a84d593fe66cca11136988
 ```
 
 ```bash
 #失败后的处理方式
-kubeadm reset
+kubeadm reset -f
 rm -rf /etc/kubernetes/*.conf
 rm -rf /etc/kubernetes/manifests/*.yaml
 docker ps -a |awk '{print $1}' |xargs docker rm -f
 systemctl  stop kubelet
-
 ifconfig cni0 down
 ip link delete cni0
 ifconfig flannel.1 down
@@ -488,7 +715,7 @@ sudo chown $(id -u):$(id -g) $HOME/.kube/config
 
 #flannel 方式
 wget https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
-kubectl apply -f https://github.com/coreos/flannel/raw/master/Documentation/kube-flannel.yml
+kubectl apply -f kube-flannel.yml
 
 ```
 
@@ -504,36 +731,32 @@ kubectl get pod -n kube-system -w
 #在k8snode01上把初始化后的证书传输到其他master节点上
 scp -r /etc/kubernetes/pki  k8snode02:/etc/kubernetes/
 scp -r /etc/kubernetes/admin.conf  k8snode02:/etc/kubernetes/admin.conf
-scp -r kubeadm-config.yaml  k8snode02:
 
 scp -r /etc/kubernetes/pki  k8snode03:/etc/kubernetes/
 scp -r /etc/kubernetes/admin.conf  k8snode03:/etc/kubernetes/admin.conf
-scp -r kubeadm-config.yaml  k8snode03:
 
-#登录到其他master节点上执行添加命令
-route add default gw 192.168.33.1
+
 #注意：比添加work节点多了 --experimental-control-plane
-#修改config
-sed -i "s/192.168.33.61/192.168.33.62/g" kubeadm-config.yaml
-#加入集群
-kubeadm join 192.168.33.66:6443 --token xzffzn.2veb9rd3hzj5kfe8 --discovery-token-ca-cert-hash sha256:1e044b5cc57a86839bdfd0c71b42e37b7c6e9c5b786bbefe8ce9cabe3537a50a --experimental-control-plane --apiserver-advertise-address 192.168.33.62
-#删除默认路由
-route del default gw 192.168.33.1
+#在node02 上执行以下命令加入集群
+kubeadm join 192.168.33.66:6443 --token cqagqf.4o3vh6gqxwwij9cf --discovery-token-ca-cert-hash sha256:a594b3b55ae13d0a782b116e65d962d07f764bc2a3a84d593fe66cca11136988 --experimental-control-plane --apiserver-advertise-address 192.168.33.62
 
+#在node02 上执行以下命令加入集群
+kubeadm join 192.168.33.66:6443 --token cqagqf.4o3vh6gqxwwij9cf --discovery-token-ca-cert-hash sha256:a594b3b55ae13d0a782b116e65d962d07f764bc2a3a84d593fe66cca11136988 --experimental-control-plane --apiserver-advertise-address 192.168.33.63
 ```
 
 
 ```bash
-#添加node节点，在对应work节点上执行添加命令
-kubeadm join 192.168.33.66:6443 --token 9dkawf.9evw3ngzmsxg1xmp --discovery-token-ca-cert-hash sha256:20f4e98e6231a3cd498a99a844d93c3f45f9991f16e245ce62ebe0d31d185875
+#添加work节点，在对应work节点上执行添加命令
+#在k8snode04上添加
+kubeadm join 192.168.33.66:6443 --token cqagqf.4o3vh6gqxwwij9cf --discovery-token-ca-cert-hash sha256:a594b3b55ae13d0a782b116e65d962d07f764bc2a3a84d593fe66cca11136988 --apiserver-advertise-address 192.168.33.64
 
+#在k8snode05上添加
+kubeadm join 192.168.33.66:6443 --token cqagqf.4o3vh6gqxwwij9cf --discovery-token-ca-cert-hash sha256:a594b3b55ae13d0a782b116e65d962d07f764bc2a3a84d593fe66cca11136988 --apiserver-advertise-address 192.168.33.65
+
+
+#在master节点上执行,查看到所有节点，到此搭建kubernetes已经完成
+kubectl get node
 ```
-
-
-
-
-
-
 
 ## 参考
 https://www.kubernetes.org.cn/3808.html
@@ -547,24 +770,7 @@ https://godoc.org/k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta1
 https://kubernetes.io/docs/setup/independent/create-cluster-kubeadm/
 https://github.com/Lentil1016/kubeadm-ha/issues/34
 https://kubernetes.io/docs/setup/independent/ha-topology/
-## 让非root用户可以使用kubectl
 
-#### 4.1. 创建用户并且设置用户可以使用sudo权限
-
-```bash
-#使用root用户新建用户
-sudo groupadd k8sadm
-sudo useradd k8sadm -g k8sadm -p 12345678
-#修改/etc/sudoers 文件使新建的用户可以使用sudo权限
-sudo chmod +w /etc/sudoers 
-# 在 Allow root to run any commands anywhere 的下面 的 root 用户的下一行添加
-#本人使用比较懒的方式
-cat <<EOF >> /etc/sudoers
-k8sadm     ALL=(ALL)       NOPASSWD:  ALL
-EOF
-#修改回原来的权限
-sudo chmod -w /etc/sudoers
-```
 
 
 
